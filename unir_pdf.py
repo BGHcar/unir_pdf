@@ -14,7 +14,13 @@ st.set_page_config(
 )
 
 try:
-    from pypdf import PdfMerger, PdfReader, PdfWriter
+    from pypdf import PdfReader, PdfWriter
+    # PdfMerger se importa de pypdf en versiones recientes
+    try:
+        from pypdf import PdfMerger
+    except ImportError:
+        # Fallback para versiones anteriores
+        from pypdf import PdfMerger
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import A4, letter, legal, A3, A5
     from reportlab.lib.utils import ImageReader
@@ -36,148 +42,6 @@ PAPER_SIZES = {
     "A5": A5,
     "A5 Horizontal": (A5[1], A5[0])
 }
-
-# Función para convertir PDF a imágenes (simulada para compatibilidad)
-def pdf_page_to_image(pdf_reader, page_num, dpi=150):
-    """
-    Convierte una página PDF a imagen (versión simulada para compatibilidad)
-    En producción real, necesitarías pdf2image con poppler
-    """
-    try:
-        # Esta es una versión simplificada que funciona sin poppler
-        # En un entorno real, usarías:
-        # from pdf2image import convert_from_bytes
-        # images = convert_from_bytes(pdf_bytes, dpi=dpi)
-        
-        # Por ahora, creamos una imagen en blanco como placeholder
-        page = pdf_reader.pages[page_num]
-        width = int(page.mediabox.width)
-        height = int(page.mediabox.height)
-        
-        # Crear imagen en blanco (simulación)
-        img = Image.new('RGB', (width, height), 'white')
-        return img
-    except Exception as e:
-        st.warning(f"Error convirtiendo página a imagen: {e}")
-        # Fallback: imagen blanca A4
-        return Image.new('RGB', (595, 842), 'white')
-
-# Función para reescalar imagen al tamaño objetivo
-def resize_image_to_fit(image, target_size):
-    """Reescala imagen manteniendo relación de aspecto"""
-    try:
-        target_width, target_height = target_size
-        
-        # Calcular relación de aspecto
-        original_width, original_height = image.size
-        original_ratio = original_width / original_height
-        target_ratio = target_width / target_height
-        
-        if original_ratio > target_ratio:
-            # La imagen es más ancha - ajustar al ancho
-            new_width = target_width
-            new_height = int(target_width / original_ratio)
-        else:
-            # La imagen es más alta - ajustar al alto
-            new_height = target_height
-            new_width = int(target_height * original_ratio)
-        
-        # Reescalar imagen
-        resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        
-        # Crear nueva imagen con fondo blanco del tamaño objetivo
-        new_image = Image.new('RGB', (target_width, target_height), 'white')
-        
-        # Centrar la imagen reescalada
-        x_offset = (target_width - new_width) // 2
-        y_offset = (target_height - new_height) // 2
-        
-        new_image.paste(resized_image, (x_offset, y_offset))
-        return new_image
-        
-    except Exception as e:
-        st.error(f"Error reescalando imagen: {e}")
-        return image
-
-# Función para crear PDF desde imagen
-def image_to_pdf(image, target_size):
-    """Convierte imagen a PDF del tamaño especificado"""
-    try:
-        buffer = io.BytesIO()
-        
-        # Crear PDF con ReportLab
-        c = canvas.Canvas(buffer, pagesize=target_size)
-        target_width, target_height = target_size
-        
-        # Convertir imagen a formato que ReportLab pueda usar
-        img_buffer = io.BytesIO()
-        image.save(img_buffer, format='PNG')
-        img_buffer.seek(0)
-        
-        # Agregar imagen al PDF
-        img_reader = ImageReader(img_buffer)
-        c.drawImage(img_reader, 0, 0, width=target_width, height=target_height, preserveAspectRatio=False)
-        c.save()
-        
-        buffer.seek(0)
-        return buffer
-        
-    except Exception as e:
-        st.error(f"Error creando PDF desde imagen: {e}")
-        # Fallback: PDF vacío del tamaño correcto
-        buffer = io.BytesIO()
-        c = canvas.Canvas(buffer, pagesize=target_size)
-        c.save()
-        buffer.seek(0)
-        return buffer
-
-# Función para reescalar página PDF (MÉTODO PRINCIPAL)
-def resize_pdf_page(pdf_reader, page_num, target_size):
-    """
-    Reescala una página PDF al tamaño objetivo
-    Usa conversión a imagen y vuelta a PDF para reescalado real
-    """
-    try:
-        # Método 1: Intentar con PyPDF (más rápido pero menos preciso)
-        try:
-            page = pdf_reader.pages[page_num]
-            original_width = float(page.mediabox.width)
-            original_height = float(page.mediabox.height)
-            target_width, target_height = target_size
-            
-            # Calcular factor de escala
-            scale_x = target_width / original_width
-            scale_y = target_height / original_height
-            scale = min(scale_x, scale_y)  # Mantener relación de aspecto
-            
-            # Aplicar transformación
-            pdf_writer = PdfWriter()
-            pdf_writer.add_page(page)
-            pdf_writer.pages[0].scale(scale, scale)
-            
-            # Ajustar mediabox al tamaño objetivo
-            pdf_writer.pages[0].mediabox.upper_right = (target_width, target_height)
-            
-            buffer = io.BytesIO()
-            pdf_writer.write(buffer)
-            buffer.seek(0)
-            
-            return PdfReader(buffer).pages[0]
-            
-        except Exception as e:
-            st.warning(f"Usando método alternativo para página {page_num + 1}: {e}")
-            
-            # Método 2: Conversión a imagen (más lento pero más preciso)
-            image = pdf_page_to_image(pdf_reader, page_num)
-            resized_image = resize_image_to_fit(image, target_size)
-            pdf_buffer = image_to_pdf(resized_image, target_size)
-            
-            return PdfReader(pdf_buffer).pages[0]
-            
-    except Exception as e:
-        st.error(f"Error grave reescalando página {page_num + 1}: {e}")
-        # Fallback: página original
-        return pdf_reader.pages[page_num]
 
 # Función para detectar el tamaño más común
 def detect_most_common_size(uploaded_files):
@@ -220,6 +84,44 @@ def find_closest_standard_size(actual_size, tolerance=50):
     
     # Si no encuentra coincidencia, usar A4
     return A4
+
+# Función para reescalar página PDF usando PyPDF
+def resize_pdf_page(pdf_reader, page_num, target_size):
+    """
+    Reescala una página PDF al tamaño objetivo usando PyPDF
+    """
+    try:
+        page = pdf_reader.pages[page_num]
+        original_width = float(page.mediabox.width)
+        original_height = float(page.mediabox.height)
+        target_width, target_height = target_size
+        
+        # Calcular factor de escala manteniendo relación de aspecto
+        scale_x = target_width / original_width
+        scale_y = target_height / original_height
+        scale = min(scale_x, scale_y)  # Mantener relación de aspecto
+        
+        # Crear nuevo writer y agregar página
+        pdf_writer = PdfWriter()
+        pdf_writer.add_page(page)
+        
+        # Aplicar transformación de escala
+        pdf_writer.pages[0].scale(scale, scale)
+        
+        # Ajustar mediabox al tamaño objetivo
+        pdf_writer.pages[0].mediabox.upper_right = (target_width, target_height)
+        
+        # Guardar en buffer
+        buffer = io.BytesIO()
+        pdf_writer.write(buffer)
+        buffer.seek(0)
+        
+        return PdfReader(buffer).pages[0]
+            
+    except Exception as e:
+        st.warning(f"Error reescalando página {page_num + 1}: {e}")
+        # Fallback: página original
+        return pdf_reader.pages[page_num]
 
 # Función para procesar un PDF individual
 def process_single_pdf(pdf_file, pages_to_remove, target_size):
