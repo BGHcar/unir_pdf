@@ -1,21 +1,21 @@
 import streamlit as st
+
+# Configuración de la página debe ser LO PRIMERO
+st.set_page_config(
+    page_title="PDF Toolkit - Unir, Dividir y Eliminar Páginas",
+    page_icon="📄",
+    layout="wide"
+)
+
 import io
 import zipfile
 from datetime import datetime
 
 try:
     from pypdf import PdfMerger, PdfReader, PdfWriter
-    st.success("✅ pypdf cargado correctamente")
 except ImportError as e:
     st.error(f"❌ Error importando pypdf: {e}")
     st.stop()
-
-# Configuración de la página
-st.set_page_config(
-    page_title="PDF Toolkit - Unir, Dividir y Eliminar Páginas",
-    page_icon="📄",
-    layout="wide"
-)
 
 # Función para procesar un PDF individual (eliminar páginas)
 def process_single_pdf(pdf_file, pages_to_remove):
