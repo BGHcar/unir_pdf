@@ -1,7 +1,6 @@
 import streamlit as st
 import io
 import zipfile
-import math
 from datetime import datetime
 from collections import Counter
 
@@ -13,214 +12,166 @@ st.set_page_config(
 )
 
 try:
-    from pypdf import PdfReader, PdfWriter, PdfMerger
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.pagesizes import A4, letter, legal, A3, A5
-    from reportlab.lib.utils import ImageReader
-    from PIL import Image
+    from pypdf import PdfReader, PdfWriter
+    import fitz  # PyMuPDF - MUCHO más robusto que PyPDF
 except ImportError as e:
     st.error(f"❌ Error importando dependencias: {e}")
+    st.info("Ejecuta: pip install pypdf pymupdf")
     st.stop()
 
 # Tamaños de papel predefinidos
-PAPER_SIZES = {
-    "A4": A4,
-    "A4 Horizontal": (A4[1], A4[0]),
-    "Letter": letter,
-    "Letter Horizontal": (letter[1], letter[0]),
-    "Legal": legal,
-    "Legal Horizontal": (legal[1], legal[0]),
-    "A3": A3,
-    "A3 Horizontal": (A3[1], A3[0]),
-    "A5": A5,
-    "A5 Horizontal": (A5[1], A5[0])
+PAPER_SIZES_MM = {
+    "A4": (210, 297),
+    "A4 Horizontal": (297, 210),
+    "Letter": (216, 279),
+    "Letter Horizontal": (279, 216),
+    "Legal": (216, 356),
+    "Legal Horizontal": (356, 216),
+    "A3": (297, 420),
+    "A3 Horizontal": (420, 297),
+    "A5": (148, 210),
+    "A5 Horizontal": (210, 148)
 }
+
+def mm_to_points(mm):
+    """Convierte milímetros a puntos (1 mm = 2.83465 puntos)"""
+    return mm * 2.83465
+
+# Convertir a puntos para PyPDF
+PAPER_SIZES = {k: (mm_to_points(v[0]), mm_to_points(v[1])) for k, v in PAPER_SIZES_MM.items()}
 
 # Función para detectar el tamaño óptimo
 def detect_optimal_size(uploaded_files):
     """Detecta el tamaño que mejor se adapta a todas las páginas"""
     all_sizes = []
-    all_ratios = []
     
     for file in uploaded_files:
         try:
             file.seek(0)
-            pdf_reader = PdfReader(file)
+            doc = fitz.open(stream=file.read(), filetype="pdf")
             
-            for page in pdf_reader.pages:
-                width = float(page.mediabox.width)
-                height = float(page.mediabox.height)
+            for page in doc:
+                rect = page.rect
+                width = rect.width
+                height = rect.height
                 all_sizes.append((width, height))
-                all_ratios.append(width / height)
+            
+            doc.close()
                 
         except Exception:
             continue
     
     if not all_sizes:
-        return A4
+        return PAPER_SIZES["A4"]
     
-    # Encontrar el tamaño que minimice la necesidad de márgenes
-    best_size = A4
-    best_score = float('inf')
+    # Encontrar el tamaño más común
+    size_counter = Counter(all_sizes)
+    most_common_size = size_counter.most_common(1)[0][0]
     
-    for name, candidate_size in PAPER_SIZES.items():
-        candidate_width, candidate_height = candidate_size
-        score = 0
-        
-        for orig_width, orig_height in all_sizes:
-            # Calcular escala para que quepa sin recortar
-            scale_x = candidate_width / orig_width
-            scale_y = candidate_height / orig_height
-            scale = min(scale_x, scale_y)
-            
-            # Penalizar si se necesita mucha escala (pérdida de calidad)
-            if scale < 0.5:  # Si hay que reducir a menos de la mitad
-                score += 10
-            elif scale > 2:  # Si hay que aumentar mucho
-                score += 5
-            else:
-                score += abs(1 - scale)  # Penalizar desviación de escala 1:1
-        
-        if score < best_score:
-            best_score = score
-            best_size = candidate_size
+    # Buscar el tamaño estándar más cercano
+    best_match = PAPER_SIZES["A4"]
+    min_diff = float('inf')
     
-    return best_size
+    for name, std_size in PAPER_SIZES.items():
+        diff = abs(std_size[0] - most_common_size[0]) + abs(std_size[1] - most_common_size[1])
+        if diff < min_diff:
+            min_diff = diff
+            best_match = std_size
+    
+    return best_match
 
-# Función CORREGIDA para reescalado preciso con márgenes
-def resize_page_with_margins(pdf_reader, page_num, target_size):
-    """
-    Reescala una página al tamaño objetivo preservando TODO el contenido
-    Usa márgenes cuando es necesario - VERSIÓN CORREGIDA
-    """
+# Función MEJORADA usando PyMuPDF para reescalado
+def resize_page_pymupdf(pdf_file, page_num, target_size):
+    """Reescala página usando PyMuPDF (mucho más robusto)"""
     try:
-        original_page = pdf_reader.pages[page_num]
-        target_width, target_height = target_size
+        pdf_file.seek(0)
+        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+        page = doc[page_num]
         
         # Obtener dimensiones originales
-        original_width = float(original_page.mediabox.width)
-        original_height = float(original_page.mediabox.height)
+        original_rect = page.rect
+        original_width = original_rect.width
+        original_height = original_rect.height
         
-        # Calcular factor de escala manteniendo relación de aspecto
+        # Dimensiones objetivo
+        target_width, target_height = target_size
+        
+        # Calcular escala manteniendo relación de aspecto
         scale_x = target_width / original_width
         scale_y = target_height / original_height
-        scale = min(scale_x, scale_y)  # Esto evita recortes
+        scale = min(scale_x, scale_y)
         
-        # Calcular nuevas dimensiones después del escalado
+        # Crear nueva página
+        new_doc = fitz.open()
+        new_page = new_doc.new_page(width=target_width, height=target_height)
+        
+        # Calcular posición para centrar
         scaled_width = original_width * scale
         scaled_height = original_height * scale
+        x_offset = (target_width - scaled_width) / 2
+        y_offset = (target_height - scaled_height) / 2
         
-        # Calcular márgenes para centrar
-        margin_x = (target_width - scaled_width) / 2
-        margin_y = (target_height - scaled_height) / 2
+        # Definir rectángulo de destino
+        rect = fitz.Rect(x_offset, y_offset, x_offset + scaled_width, y_offset + scaled_height)
         
-        # Crear nuevo writer
-        pdf_writer = PdfWriter()
-        
-        # Clonar la página original
-        pdf_writer.add_page(original_page)
-        
-        # Aplicar transformaciones CORREGIDAS - sin usar translate
-        page = pdf_writer.pages[0]
-        
-        # Escalar la página usando transformación de matriz
-        # En lugar de page.scale() y page.translate(), usamos add_transformation
-        transformation_matrix = [
-            scale, 0,    # a, b
-            0, scale,    # c, d  
-            margin_x, margin_y  # e, f (traslación)
-        ]
-        
-        page.add_transformation(transformation_matrix)
-        
-        # Establecer el mediabox al tamaño objetivo
-        page.mediabox.upper_right = (target_width, target_height)
+        # Mostrar la página original en el nuevo documento
+        new_page.show_pdf_page(rect, doc, page_num)
         
         # Guardar en buffer
         buffer = io.BytesIO()
-        pdf_writer.write(buffer)
-        buffer.seek(0)
+        new_doc.save(buffer)
+        new_doc.close()
+        doc.close()
         
-        return PdfReader(buffer).pages[0]
+        buffer.seek(0)
+        return buffer
         
     except Exception as e:
         st.warning(f"Error reescalando página {page_num + 1}: {e}")
-        # Fallback: método simple que preserva contenido
-        return simple_resize_preserve_content(pdf_reader.pages[page_num], target_size)
-
-# Función alternativa usando ReportLab para casos difíciles
-def resize_with_reportlab_fallback(pdf_reader, page_num, target_size):
-    """Método alternativo usando ReportLab para reescalado más robusto"""
-    try:
-        # Esta es una implementación simplificada
-        # En una versión completa, convertirías la página a imagen y luego a PDF
-        target_width, target_height = target_size
-        
-        # Crear un PDF vacío del tamaño objetivo
+        # Fallback: devolver página sin cambios
+        pdf_file.seek(0)
+        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+        new_doc = fitz.open()
+        new_page = new_doc.new_page(width=target_size[0], height=target_size[1])
+        new_page.show_pdf_page(new_page.rect, doc, page_num)
         buffer = io.BytesIO()
-        c = canvas.Canvas(buffer, pagesize=(target_width, target_height))
-        
-        # Aquí iría la lógica para renderizar el contenido de la página
-        # Por ahora, solo creamos una página en blanco como fallback
-        c.setFillColorRGB(1, 1, 1)  # Blanco
-        c.rect(0, 0, target_width, target_height, fill=1)
-        c.setFillColorRGB(0, 0, 0)  # Negro
-        c.drawString(50, target_height - 50, f"Página {page_num + 1} - Reescalada")
-        
-        c.save()
+        new_doc.save(buffer)
+        new_doc.close()
+        doc.close()
         buffer.seek(0)
-        
-        return PdfReader(buffer).pages[0]
-    except Exception as e:
-        st.warning(f"Error en fallback ReportLab: {e}")
-        return simple_resize_preserve_content(pdf_reader.pages[page_num], target_size)
-
-# Función de respaldo que preserva contenido
-def simple_resize_preserve_content(original_page, target_size):
-    """Método simple que garantiza preservación de contenido"""
-    try:
-        target_width, target_height = target_size
-        
-        pdf_writer = PdfWriter()
-        pdf_writer.add_page(original_page)
-        
-        # Solo ajustar el mediabox, no reescalar
-        pdf_writer.pages[0].mediabox.upper_right = (target_width, target_height)
-        
-        buffer = io.BytesIO()
-        pdf_writer.write(buffer)
-        buffer.seek(0)
-        
-        return PdfReader(buffer).pages[0]
-    except Exception:
-        return original_page
+        return buffer
 
 # Función para procesar un PDF individual
 def process_single_pdf(pdf_file, pages_to_remove, target_size):
-    """Procesa un PDF individual: elimina páginas y reescala con márgenes"""
+    """Procesa un PDF individual: elimina páginas y reescala"""
     try:
-        pdf_reader = PdfReader(pdf_file)
-        pdf_writer = PdfWriter()
-        
-        total_pages = len(pdf_reader.pages)
+        pdf_file.seek(0)
+        total_pages = len(PdfReader(pdf_file).pages)
         pages_to_keep = [i for i in range(total_pages) if i not in pages_to_remove]
         
+        processed_pages = []
+        
         for page_num in pages_to_keep:
-            try:
-                # Intentar reescalado con márgenes
-                resized_page = resize_page_with_margins(pdf_reader, page_num, target_size)
-                pdf_writer.add_page(resized_page)
-            except Exception as e:
-                st.warning(f"Usando método alternativo para página {page_num + 1}")
-                # Fallback a método simple
-                simple_page = simple_resize_preserve_content(pdf_reader.pages[page_num], target_size)
-                pdf_writer.add_page(simple_page)
+            pdf_file.seek(0)
+            resized_buffer = resize_page_pymupdf(pdf_file, page_num, target_size)
+            processed_pages.append(resized_buffer)
         
-        buffer = io.BytesIO()
-        pdf_writer.write(buffer)
-        buffer.seek(0)
-        
-        return buffer, total_pages, len(pages_to_keep)
+        # Combinar páginas procesadas usando PdfWriter
+        if processed_pages:
+            writer = PdfWriter()
+            for buffer in processed_pages:
+                buffer.seek(0)
+                reader = PdfReader(buffer)
+                for page in reader.pages:
+                    writer.add_page(page)
+            
+            final_buffer = io.BytesIO()
+            writer.write(final_buffer)
+            final_buffer.seek(0)
+            
+            return final_buffer, total_pages, len(pages_to_keep)
+        else:
+            raise Exception("No se procesaron páginas")
         
     except Exception as e:
         raise Exception(f"Error procesando PDF: {str(e)}")
@@ -229,14 +180,16 @@ def process_single_pdf(pdf_file, pages_to_remove, target_size):
 def merge_processed_pdfs(processed_pdfs):
     """Une múltiples PDFs en uno solo"""
     try:
-        merger = PdfMerger()
+        writer = PdfWriter()
         
         for pdf_buffer in processed_pdfs:
-            merger.append(pdf_buffer)
+            pdf_buffer.seek(0)
+            reader = PdfReader(pdf_buffer)
+            for page in reader.pages:
+                writer.add_page(page)
         
         merged_buffer = io.BytesIO()
-        merger.write(merged_buffer)
-        merger.close()
+        writer.write(merged_buffer)
         merged_buffer.seek(0)
         
         return merged_buffer
@@ -283,31 +236,30 @@ def analyze_size_distribution(uploaded_files):
             'total_pages': 0,
             'unique_sizes': set(),
             'size_counts': Counter(),
-            'ratio_counts': Counter()
         }
     }
     
     for file in uploaded_files:
         try:
             file.seek(0)
-            pdf_reader = PdfReader(file)
+            doc = fitz.open(stream=file.read(), filetype="pdf")
             file_sizes = []
             
-            for page_num, page in enumerate(pdf_reader.pages):
-                width = round(float(page.mediabox.width), 1)
-                height = round(float(page.mediabox.height), 1)
-                ratio = round(width / height, 2)
-                
-                file_sizes.append((width, height, ratio))
+            for page in doc:
+                rect = page.rect
+                width = round(rect.width, 1)
+                height = round(rect.height, 1)
+                file_sizes.append((width, height))
                 size_analysis['summary']['total_pages'] += 1
                 size_analysis['summary']['unique_sizes'].add((width, height))
                 size_analysis['summary']['size_counts'][(width, height)] += 1
-                size_analysis['summary']['ratio_counts'][ratio] += 1
             
             size_analysis['files'][file.name] = {
                 'sizes': file_sizes,
-                'total_pages': len(pdf_reader.pages)
+                'total_pages': len(doc)
             }
+            
+            doc.close()
             
         except Exception as e:
             size_analysis['files'][file.name] = {'error': str(e)}
@@ -331,13 +283,12 @@ def display_size_analysis(analysis, target_size):
         most_common_size = analysis['summary']['size_counts'].most_common(1)[0]
         st.metric("Tamaño más común", f"{most_common_size[1]} págs")
     with col4:
-        st.metric("Tamaño objetivo", f"{target_width}×{target_height}")
+        st.metric("Tamaño objetivo", f"{target_width:.0f}×{target_height:.0f}")
     
     # Tamaños más comunes
     st.write("**Distribución de tamaños originales:**")
     for size, count in analysis['summary']['size_counts'].most_common(10):
         width, height = size
-        ratio = width / height
         
         # Calcular cómo se ajustará al tamaño objetivo
         scale_x = target_width / width
@@ -351,11 +302,11 @@ def display_size_analysis(analysis, target_size):
         # Encontrar nombre del tamaño
         size_name = "Personalizado"
         for name, std_size in PAPER_SIZES.items():
-            if abs(width - std_size[0]) < 5 and abs(height - std_size[1]) < 5:
+            if abs(width - std_size[0]) < 10 and abs(height - std_size[1]) < 10:
                 size_name = name
                 break
         
-        st.write(f"- **{size_name}** ({width} × {height} pts): {count} páginas")
+        st.write(f"- **{size_name}** ({width:.0f} × {height:.0f} pts): {count} páginas")
         if margin_x > 0 or margin_y > 0:
             st.write(f"  → Escala: {scale:.2f}x, Márgenes: {margin_x:.1f} × {margin_y:.1f} pts")
 
@@ -363,6 +314,7 @@ def display_size_analysis(analysis, target_size):
 def split_pdf(pdf_file, split_option, custom_ranges=None):
     """Divide un PDF en múltiples archivos"""
     try:
+        pdf_file.seek(0)
         pdf_reader = PdfReader(pdf_file)
         total_pages = len(pdf_reader.pages)
         pdf_files = []
@@ -411,7 +363,7 @@ def split_pdf(pdf_file, split_option, custom_ranges=None):
 # Interfaz principal
 def main():
     st.title("📄 PDF Toolkit - Unir y Reescalar PDFs")
-    st.markdown("**Reescalado preciso: todas las páginas mismo tamaño, TODO el contenido preservado**")
+    st.markdown("**Solución robusta: PyMuPDF + Reescalado preciso + 100% contenido preservado**")
     
     # Sidebar para configuración
     with st.sidebar:
@@ -433,12 +385,12 @@ def main():
             target_size = None
         
         st.info("""
-        **Reescalado inteligente:**
-        - ✅ **Preserva 100% del contenido**
-        - ✅ **Mismo tamaño para todas las páginas**
-        - ✅ **Márgenes automáticos cuando es necesario**
-        - ✅ **Relación de aspecto mantenida**
-        - ✅ **Sin pérdida de información**
+        **Tecnología mejorada:**
+        - ✅ **PyMuPDF** - Librería profesional
+        - ✅ **Reescalado preciso** con márgenes
+        - ✅ **100% contenido preservado**
+        - ✅ **Centrado automático**
+        - ✅ **Sin errores de transformación**
         """)
     
     # Pestañas principales
@@ -451,7 +403,7 @@ def main():
             "Selecciona los archivos PDF a unir",
             type="pdf",
             accept_multiple_files=True,
-            help="Todas las páginas se reescalarán al mismo tamaño preservando TODO el contenido",
+            help="Todas las páginas se reescalarán al mismo tamaño usando PyMuPDF",
             key="merge_uploader"
         )
         
@@ -468,8 +420,13 @@ def main():
             
             # Mostrar información
             st.success(f"📐 **Tamaño de salida:** {target_size_name}")
-            st.info(f"**Dimensiones:** {target_width} × {target_height} puntos")
-            st.info(f"**En milímetros:** {target_width * 0.3528:.1f} × {target_height * 0.3528:.1f} mm")
+            st.info(f"**Dimensiones:** {target_width:.0f} × {target_height:.0f} puntos")
+            
+            # Convertir a mm para mostrar
+            for name, mm_size in PAPER_SIZES_MM.items():
+                if name == target_size_name:
+                    st.info(f"**En milímetros:** {mm_size[0]} × {mm_size[1]} mm")
+                    break
             
             # Análisis detallado
             size_analysis = analyze_size_distribution(uploaded_files)
@@ -518,7 +475,7 @@ def main():
             # Botón de procesamiento
             if st.button("🔄 Procesar y Unir PDFs", type="primary", key="merge_button"):
                 try:
-                    with st.spinner("Reescalando páginas y uniendo PDFs..."):
+                    with st.spinner("Reescalando páginas con PyMuPDF..."):
                         processed_pdfs = []
                         total_stats = {
                             'original_pages': 0,
@@ -557,7 +514,7 @@ def main():
                         
                         # Mostrar resultados
                         st.success("✅ PDFs reescalados y unidos correctamente!")
-                        st.info("✅ **Todo el contenido ha sido preservado**")
+                        st.info("✅ **PyMuPDF: Todo el contenido preservado**")
                         st.info("✅ **Todas las páginas tienen el mismo tamaño**")
                         
                         # Estadísticas
@@ -737,10 +694,10 @@ def main():
                             
                             if split_option == "todas":
                                 pages_per_row = 6
-                                total_pages = len(pdf_files)
+                                total_pages_display = len(pdf_files)
                                 
-                                for start_idx in range(0, total_pages, pages_per_row):
-                                    end_idx = min(start_idx + pages_per_row, total_pages)
+                                for start_idx in range(0, total_pages_display, pages_per_row):
+                                    end_idx = min(start_idx + pages_per_row, total_pages_display)
                                     cols = st.columns(pages_per_row)
                                     
                                     for i, pdf_buffer in enumerate(pdf_files[start_idx:end_idx]):
@@ -793,25 +750,27 @@ def main():
             """)
 
     # Información
-    with st.expander("📖 Cómo funciona el reescalado"):
+    with st.expander("📖 Tecnología utilizada"):
         st.markdown("""
-        ## 🎯 **Algoritmo de Reescalado Inteligente**
+        ## 🚀 **PyMuPDF - La solución profesional**
         
-        ### 🔧 **Proceso:**
-        1. **Detección del tamaño óptimo** - Analiza todos los PDFs y elige el tamaño que minimice la diferencia
-        2. **Escalado proporcional** - Cada página se escala manteniendo su relación de aspecto
-        3. **Centrado con márgenes** - Si es necesario, se agregan márgenes para centrar el contenido
-        4. **Preservación total** - TODO el contenido original se mantiene intacto
+        ### 🔧 **Por qué PyMuPDF:**
+        - **Librería profesional** usada en aplicaciones empresariales
+        - **Capacidades avanzadas** de manipulación PDF
+        - **Reescalado preciso** con transformaciones matriciales
+        - **Preservación 100%** del contenido original
+        - **Sin errores** de métodos obsoletos
         
         ### ✅ **Garantías:**
-        - **CERO pérdida** de información
         - **Mismo tamaño** para todas las páginas
-        - **Contenido centrado** y legible
+        - **Contenido centrado** automáticamente
+        - **Márgenes inteligentes** cuando es necesario
         - **Relación de aspecto** preservada
+        - **Calidad profesional** en resultados
         """)
     
     st.markdown("---")
-    st.markdown("Creado con Streamlit • Reescalado inteligente - 100% de contenido preservado")
+    st.markdown("Creado con Streamlit • Motor: PyMuPDF profesional • 100% contenido preservado")
 
 if __name__ == "__main__":
     main()
