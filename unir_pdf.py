@@ -87,11 +87,11 @@ def detect_optimal_size(uploaded_files):
     
     return best_size
 
-# Función MEJORADA para reescalado preciso con márgenes
+# Función CORREGIDA para reescalado preciso con márgenes
 def resize_page_with_margins(pdf_reader, page_num, target_size):
     """
     Reescala una página al tamaño objetivo preservando TODO el contenido
-    Usa márgenes cuando es necesario
+    Usa márgenes cuando es necesario - VERSIÓN CORREGIDA
     """
     try:
         original_page = pdf_reader.pages[page_num]
@@ -120,14 +120,18 @@ def resize_page_with_margins(pdf_reader, page_num, target_size):
         # Clonar la página original
         pdf_writer.add_page(original_page)
         
-        # Aplicar transformaciones
+        # Aplicar transformaciones CORREGIDAS - sin usar translate
         page = pdf_writer.pages[0]
         
-        # Primero escalar
-        page.scale(scale, scale)
+        # Escalar la página usando transformación de matriz
+        # En lugar de page.scale() y page.translate(), usamos add_transformation
+        transformation_matrix = [
+            scale, 0,    # a, b
+            0, scale,    # c, d  
+            margin_x, margin_y  # e, f (traslación)
+        ]
         
-        # Luego trasladar para centrar (agregar márgenes)
-        page.translate(margin_x, margin_y)
+        page.add_transformation(transformation_matrix)
         
         # Establecer el mediabox al tamaño objetivo
         page.mediabox.upper_right = (target_width, target_height)
@@ -142,6 +146,33 @@ def resize_page_with_margins(pdf_reader, page_num, target_size):
     except Exception as e:
         st.warning(f"Error reescalando página {page_num + 1}: {e}")
         # Fallback: método simple que preserva contenido
+        return simple_resize_preserve_content(pdf_reader.pages[page_num], target_size)
+
+# Función alternativa usando ReportLab para casos difíciles
+def resize_with_reportlab_fallback(pdf_reader, page_num, target_size):
+    """Método alternativo usando ReportLab para reescalado más robusto"""
+    try:
+        # Esta es una implementación simplificada
+        # En una versión completa, convertirías la página a imagen y luego a PDF
+        target_width, target_height = target_size
+        
+        # Crear un PDF vacío del tamaño objetivo
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=(target_width, target_height))
+        
+        # Aquí iría la lógica para renderizar el contenido de la página
+        # Por ahora, solo creamos una página en blanco como fallback
+        c.setFillColorRGB(1, 1, 1)  # Blanco
+        c.rect(0, 0, target_width, target_height, fill=1)
+        c.setFillColorRGB(0, 0, 0)  # Negro
+        c.drawString(50, target_height - 50, f"Página {page_num + 1} - Reescalada")
+        
+        c.save()
+        buffer.seek(0)
+        
+        return PdfReader(buffer).pages[0]
+    except Exception as e:
+        st.warning(f"Error en fallback ReportLab: {e}")
         return simple_resize_preserve_content(pdf_reader.pages[page_num], target_size)
 
 # Función de respaldo que preserva contenido
@@ -175,9 +206,15 @@ def process_single_pdf(pdf_file, pages_to_remove, target_size):
         pages_to_keep = [i for i in range(total_pages) if i not in pages_to_remove]
         
         for page_num in pages_to_keep:
-            # Reescalar la página al tamaño objetivo con márgenes
-            resized_page = resize_page_with_margins(pdf_reader, page_num, target_size)
-            pdf_writer.add_page(resized_page)
+            try:
+                # Intentar reescalado con márgenes
+                resized_page = resize_page_with_margins(pdf_reader, page_num, target_size)
+                pdf_writer.add_page(resized_page)
+            except Exception as e:
+                st.warning(f"Usando método alternativo para página {page_num + 1}")
+                # Fallback a método simple
+                simple_page = simple_resize_preserve_content(pdf_reader.pages[page_num], target_size)
+                pdf_writer.add_page(simple_page)
         
         buffer = io.BytesIO()
         pdf_writer.write(buffer)
@@ -319,7 +356,8 @@ def display_size_analysis(analysis, target_size):
                 break
         
         st.write(f"- **{size_name}** ({width} × {height} pts): {count} páginas")
-        st.write(f"  → Escala: {scale:.2f}x, Márgenes: {margin_x:.1f} × {margin_y:.1f} pts")
+        if margin_x > 0 or margin_y > 0:
+            st.write(f"  → Escala: {scale:.2f}x, Márgenes: {margin_x:.1f} × {margin_y:.1f} pts")
 
 # Función para dividir PDF
 def split_pdf(pdf_file, split_option, custom_ranges=None):
@@ -770,11 +808,6 @@ def main():
         - **Mismo tamaño** para todas las páginas
         - **Contenido centrado** y legible
         - **Relación de aspecto** preservada
-        
-        ### 📐 **Cuando se usan márgenes:**
-        - Páginas **más pequeñas** → Márgenes para alcanzar el tamaño objetivo
-        - Páginas **más grandes** → Se escalan para que quepan sin recortes
-        - Páginas **con diferente relación** → Se escalan proporcionalmente y se centran
         """)
     
     st.markdown("---")
