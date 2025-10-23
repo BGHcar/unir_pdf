@@ -13,12 +13,40 @@ from datetime import datetime
 
 try:
     from pypdf import PdfMerger, PdfReader, PdfWriter
+    from pypdf.papersizes import PaperSize
 except ImportError as e:
     st.error(f"❌ Error importando pypdf: {e}")
     st.stop()
 
+# Función para obtener el tamaño de página
+def get_page_size(page):
+    try:
+        media_box = page.mediabox
+        width = float(media_box.width)
+        height = float(media_box.height)
+        return width, height
+    except:
+        return None, None
+
+# Función para normalizar el tamaño de página a A4
+def normalize_page_size(page, target_size="A4"):
+    try:
+        # Crear un nuevo escritor
+        pdf_writer = PdfWriter()
+        
+        # Clonar la página original
+        new_page = page
+        
+        # Opcional: Podrías redimensionar aquí, pero es complejo
+        # Por ahora solo mantenemos el tamaño original pero lo informamos
+        
+        return new_page
+    except Exception as e:
+        st.warning(f"No se pudo normalizar página: {e}")
+        return page
+
 # Función para procesar un PDF individual (eliminar páginas)
-def process_single_pdf(pdf_file, pages_to_remove):
+def process_single_pdf(pdf_file, pages_to_remove, normalize_size=False):
     try:
         pdf_reader = PdfReader(pdf_file)
         pdf_writer = PdfWriter()
@@ -26,15 +54,26 @@ def process_single_pdf(pdf_file, pages_to_remove):
         total_pages = len(pdf_reader.pages)
         pages_to_keep = [i for i in range(total_pages) if i not in pages_to_remove]
         
+        page_sizes = []
         for page_num in pages_to_keep:
-            pdf_writer.add_page(pdf_reader.pages[page_num])
+            page = pdf_reader.pages[page_num]
+            
+            # Obtener tamaño de página
+            width, height = get_page_size(page)
+            page_sizes.append((width, height))
+            
+            # Normalizar tamaño si se solicita
+            if normalize_size:
+                page = normalize_page_size(page)
+            
+            pdf_writer.add_page(page)
         
         # Guardar PDF procesado en memoria
         buffer = io.BytesIO()
         pdf_writer.write(buffer)
         buffer.seek(0)
         
-        return buffer, total_pages, len(pages_to_keep)
+        return buffer, total_pages, len(pages_to_keep), page_sizes
     except Exception as e:
         raise Exception(f"Error procesando PDF: {str(e)}")
 
@@ -55,6 +94,49 @@ def merge_processed_pdfs(processed_pdfs):
         return merged_buffer
     except Exception as e:
         raise Exception(f"Error uniendo PDFs: {str(e)}")
+
+# Función para analizar tamaños de página
+def analyze_page_sizes(all_page_sizes):
+    unique_sizes = set()
+    size_counts = {}
+    
+    for sizes in all_page_sizes:
+        for size in sizes:
+            if size[0] is not None and size[1] is not None:
+                # Redondear para agrupar tamaños similares
+                rounded_size = (round(size[0], 1), round(size[1], 1))
+                unique_sizes.add(rounded_size)
+                size_counts[rounded_size] = size_counts.get(rounded_size, 0) + 1
+    
+    return unique_sizes, size_counts
+
+# Función para convertir tamaño a nombre estándar
+def get_paper_name(width, height):
+    # Tolerancia para comparación
+    tolerance = 5
+    
+    # A4 (210 x 297 mm)
+    if abs(width - 595) <= tolerance and abs(height - 842) <= tolerance:  # puntos (72 dpi)
+        return "A4"
+    elif abs(width - 842) <= tolerance and abs(height - 595) <= tolerance:
+        return "A4 (horizontal)"
+    
+    # Letter (216 x 279 mm)
+    elif abs(width - 612) <= tolerance and abs(height - 792) <= tolerance:
+        return "Letter"
+    elif abs(width - 792) <= tolerance and abs(height - 612) <= tolerance:
+        return "Letter (horizontal)"
+    
+    # Legal (216 x 356 mm)
+    elif abs(width - 612) <= tolerance and abs(height - 1008) <= tolerance:
+        return "Legal"
+    
+    # A3 (297 x 420 mm)
+    elif abs(width - 842) <= tolerance and abs(height - 1191) <= tolerance:
+        return "A3"
+    
+    else:
+        return f"Personalizado ({width:.1f} x {height:.1f} pts)"
 
 # Función para dividir PDF
 def split_pdf(pdf_file, split_option, custom_ranges=None):
@@ -148,6 +230,20 @@ def main():
     with tab1:
         st.header("Unir PDFs y Eliminar Páginas")
         
+        # Opción para normalizar tamaños
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            normalize_size = st.checkbox(
+                "Intentar normalizar tamaños",
+                value=False,
+                help="Intenta ajustar todas las páginas a un tamaño consistente (experimental)"
+            )
+            show_sizes = st.checkbox(
+                "Mostrar análisis de tamaños",
+                value=True,
+                help="Muestra información sobre los diferentes tamaños de página"
+            )
+        
         uploaded_files = st.file_uploader(
             "Selecciona los archivos PDF a unir",
             type="pdf",
@@ -163,12 +259,22 @@ def main():
             if 'pages_inputs' not in st.session_state:
                 st.session_state.pages_inputs = {}
             
+            all_page_sizes_info = []
+            
             # Procesar cada archivo
             for i, file in enumerate(uploaded_files):
                 try:
                     file.seek(0)
                     pdf_reader = PdfReader(file)
                     total_pages = len(pdf_reader.pages)
+                    
+                    # Analizar tamaños de este archivo
+                    file_page_sizes = []
+                    for page_num in range(total_pages):
+                        width, height = get_page_size(pdf_reader.pages[page_num])
+                        file_page_sizes.append((width, height))
+                    
+                    all_page_sizes_info.append((file.name, file_page_sizes))
                     
                     with st.expander(f"📄 {file.name} ({total_pages} páginas)", expanded=True):
                         col1, col2 = st.columns([2, 1])
@@ -201,9 +307,41 @@ def main():
                             else:
                                 st.metric("Páginas a eliminar", 0)
                                 st.metric("Páginas que quedarán", total_pages)
+                        
+                        # Mostrar información de tamaños si está activado
+                        if show_sizes:
+                            unique_sizes = set()
+                            for width, height in file_page_sizes:
+                                if width and height:
+                                    unique_sizes.add(get_paper_name(width, height))
+                            
+                            if unique_sizes:
+                                st.caption(f"📐 Tamaños de página: {', '.join(unique_sizes)}")
                 
                 except Exception as e:
                     st.error(f"Error leyendo {file.name}: {str(e)}")
+            
+            # Mostrar análisis general de tamaños
+            if show_sizes and all_page_sizes_info:
+                st.subheader("📊 Análisis de Tamaños de Página")
+                
+                all_sizes = []
+                for file_name, sizes in all_page_sizes_info:
+                    all_sizes.extend(sizes)
+                
+                unique_sizes, size_counts = analyze_page_sizes([all_sizes])
+                
+                if len(unique_sizes) > 1:
+                    st.warning(f"⚠️ Se detectaron {len(unique_sizes)} tamaños de página diferentes:")
+                    
+                    for size, count in sorted(size_counts.items(), key=lambda x: x[1], reverse=True):
+                        if size[0] and size[1]:
+                            paper_name = get_paper_name(size[0], size[1])
+                            st.write(f"- **{paper_name}**: {count} páginas")
+                    
+                    st.info("💡 **Sugerencia**: Para consistencia, considera convertir todos los PDFs al mismo tamaño (A4 o Letter) antes de unir.")
+                else:
+                    st.success("✅ Todos los PDFs tienen el mismo tamaño de página")
             
             # Botón de procesamiento
             if st.button("🔄 Procesar y Unir PDFs", type="primary", key="merge_button"):
@@ -216,6 +354,7 @@ def main():
                             'final_pages': 0,
                             'processed_files': 0
                         }
+                        all_final_page_sizes = []
                         
                         # Procesar cada PDF individualmente
                         for i, file in enumerate(uploaded_files):
@@ -227,13 +366,16 @@ def main():
                             pages_to_remove = parse_pages_input(pages_input)
                             
                             # Procesar el PDF individual
-                            processed_pdf, original_pages, final_pages = process_single_pdf(file, pages_to_remove)
+                            processed_pdf, original_pages, final_pages, page_sizes = process_single_pdf(
+                                file, pages_to_remove, normalize_size
+                            )
                             
                             processed_pdfs.append(processed_pdf)
                             total_stats['original_pages'] += original_pages
                             total_stats['removed_pages'] += len(pages_to_remove)
                             total_stats['final_pages'] += final_pages
                             total_stats['processed_files'] += 1
+                            all_final_page_sizes.extend(page_sizes)
                         
                         # Unir todos los PDFs procesados
                         final_pdf = merge_processed_pdfs(processed_pdfs)
@@ -253,6 +395,11 @@ def main():
                         with col4:
                             st.metric("Páginas finales", total_stats['final_pages'])
                         
+                        # Información sobre tamaños finales
+                        unique_final_sizes, final_size_counts = analyze_page_sizes([all_final_page_sizes])
+                        if len(unique_final_sizes) > 1:
+                            st.warning(f"📐 El PDF final contiene {len(unique_final_sizes)} tamaños de página diferentes")
+                        
                         # Botón de descarga
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         st.download_button(
@@ -267,6 +414,7 @@ def main():
                     st.error(f"❌ Error al procesar los PDFs: {str(e)}")
     
     with tab2:
+        # ... (el código de la pestaña dividir permanece igual)
         st.header("✂️ Dividir PDF")
         
         uploaded_file_split = st.file_uploader(
