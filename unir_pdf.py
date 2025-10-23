@@ -4,9 +4,10 @@ import zipfile
 from datetime import datetime
 
 try:
-    from PyPDF2 import PdfMerger, PdfReader, PdfWriter
-except ImportError:
-    st.error("❌ PyPDF2 no está instalado. Por favor, asegúrate de que está en requirements.txt")
+    from pypdf import PdfMerger, PdfReader, PdfWriter
+    st.success("✅ pypdf cargado correctamente")
+except ImportError as e:
+    st.error(f"❌ Error importando pypdf: {e}")
     st.stop()
 
 # Configuración de la página
@@ -381,7 +382,7 @@ def main():
     
     # Pie de página
     st.markdown("---")
-    st.markdown("Creado con Streamlit y PyPDF2 • Tus archivos se procesan localmente")
+    st.markdown("Creado con Streamlit y pypdf • Tus archivos se procesan localmente")
 
 if __name__ == "__main__":
     main()
